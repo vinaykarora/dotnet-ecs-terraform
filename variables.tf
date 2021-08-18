@@ -2,6 +2,14 @@ variable "region" {
   description = "Region that the instances will be created"
 }
 
+variable "app_name" {
+  description = "The application name"
+}
+
+variable "environment" {
+  description = "The environment name"
+}
+
 /*====
 environment specific variables
 ======*/
