@@ -2,8 +2,13 @@ variable "environment" {
   description = "The environment"
 }
 
+
+variable "app_name" {
+  description = "The application name"
+}
+
 variable "subnet_ids" {
-  type        = "list"
+  type        = list(string)
   description = "Subnet ids"
 }
 

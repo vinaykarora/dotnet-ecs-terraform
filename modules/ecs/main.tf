@@ -2,26 +2,31 @@
 Cloudwatch Log Group
 ======*/
 resource "aws_cloudwatch_log_group" "openjobs" {
-  name = "openjobs"
+  name = var.app_name
 
-  tags {
+  tags = {
     Environment = "${var.environment}"
-    Application = "OpenJobs"
+    Application = "${var.app_name}"
   }
+}
+
+resource "aws_cloudwatch_log_stream" "openjobs_log_stream" {
+  name           = "${var.app_name}-log-stream"
+  log_group_name = aws_cloudwatch_log_group.openjobs.name
 }
 
 /*====
 ECR repository to store our Docker images
 ======*/
 resource "aws_ecr_repository" "openjobs_app" {
-  name = "${var.repository_name}"
+  name = var.repository_name
 }
 
 /*====
 ECS cluster
 ======*/
 resource "aws_ecs_cluster" "cluster" {
-  name = "${var.environment}-ecs-cluster"
+  name = "${var.app_name}-${var.environment}-ecs-cluster"
 }
 
 /*====
@@ -30,9 +35,9 @@ ECS task definitions
 
 /* the task definition for the web service */
 data "template_file" "web_task" {
-  template = "${file("${path.module}/tasks/web_task_definition.json")}"
+  template = file("${path.module}/tasks/web_task_definition.json")
 
-  vars {
+  vars = {
     image           = "${aws_ecr_repository.openjobs_app.repository_url}"
     secret_key_base = "${var.secret_key_base}"
     database_url    = "postgresql://${var.database_username}:${var.database_password}@${var.database_endpoint}:5432/${var.database_name}?encoding=utf8&pool=40"
@@ -41,21 +46,21 @@ data "template_file" "web_task" {
 }
 
 resource "aws_ecs_task_definition" "web" {
-  family                   = "${var.environment}_web"
-  container_definitions    = "${data.template_file.web_task.rendered}"
+  family                   = "${var.app_name}_${var.environment}_web"
+  container_definitions    = data.template_file.web_task.rendered
   requires_compatibilities = ["FARGATE"]
   network_mode             = "awsvpc"
   cpu                      = "256"
   memory                   = "512"
-  execution_role_arn       = "${aws_iam_role.ecs_execution_role.arn}"
-  task_role_arn            = "${aws_iam_role.ecs_execution_role.arn}"
+  execution_role_arn       = aws_iam_role.ecs_execution_role.arn
+  task_role_arn            = aws_iam_role.ecs_execution_role.arn
 }
 
 /* the task definition for the db migration */
 data "template_file" "db_migrate_task" {
-  template = "${file("${path.module}/tasks/db_migrate_task_definition.json")}"
+  template = file("${path.module}/tasks/db_migrate_task_definition.json")
 
-  vars {
+  vars = {
     image           = "${aws_ecr_repository.openjobs_app.repository_url}"
     secret_key_base = "${var.secret_key_base}"
     database_url    = "postgresql://${var.database_username}:${var.database_password}@${var.database_endpoint}:5432/${var.database_name}?encoding=utf8&pool=40"
@@ -64,14 +69,14 @@ data "template_file" "db_migrate_task" {
 }
 
 resource "aws_ecs_task_definition" "db_migrate" {
-  family                   = "${var.environment}_db_migrate"
-  container_definitions    = "${data.template_file.db_migrate_task.rendered}"
+  family                   = "${var.app_name}_${var.environment}_db_migrate"
+  container_definitions    = data.template_file.db_migrate_task.rendered
   requires_compatibilities = ["FARGATE"]
   network_mode             = "awsvpc"
   cpu                      = "256"
   memory                   = "512"
-  execution_role_arn       = "${aws_iam_role.ecs_execution_role.arn}"
-  task_role_arn            = "${aws_iam_role.ecs_execution_role.arn}"
+  execution_role_arn       = aws_iam_role.ecs_execution_role.arn
+  task_role_arn            = aws_iam_role.ecs_execution_role.arn
 }
 
 /*====
@@ -81,23 +86,33 @@ resource "random_id" "target_group_sufix" {
   byte_length = 2
 }
 
-resource "aws_alb_target_group" "alb_target_group" {
-  name     = "${var.environment}-alb-target-group-${random_id.target_group_sufix.hex}"
-  port     = 80
-  protocol = "HTTP"
-  vpc_id   = "${var.vpc_id}"
+resource "aws_alb_target_group" "app" {
+  name        = "${var.app_name}-${var.environment}-target-group-${random_id.target_group_sufix.hex}"
+  port        = 80
+  protocol    = "HTTP"
+  vpc_id      = var.vpc_id
   target_type = "ip"
 
   lifecycle {
     create_before_destroy = true
   }
+
+  health_check {
+    healthy_threshold   = "3"
+    interval            = "30"
+    protocol            = "HTTP"
+    matcher             = "200"
+    timeout             = "3"
+    path                = var.health_check_path
+    unhealthy_threshold = "2"
+  }
 }
 
 /* security group for ALB */
 resource "aws_security_group" "web_inbound_sg" {
-  name        = "${var.environment}-web-inbound-sg"
+  name        = "${var.app_name}-${var.environment}-web-inbound-sg"
   description = "Allow HTTP from Anywhere into ALB"
-  vpc_id      = "${var.vpc_id}"
+  vpc_id      = var.vpc_id
 
   ingress {
     from_port   = 80
@@ -120,30 +135,30 @@ resource "aws_security_group" "web_inbound_sg" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  tags {
-    Name = "${var.environment}-web-inbound-sg"
+  tags = {
+    Name = "${var.app_name}-${var.environment}-web-inbound-sg"
   }
 }
 
-resource "aws_alb" "alb_openjobs" {
-  name            = "${var.environment}-alb-openjobs"
-  subnets         = ["${var.public_subnet_ids}"]
-  security_groups = ["${var.security_groups_ids}", "${aws_security_group.web_inbound_sg.id}"]
+resource "aws_alb" "main" {
+  name            = "${var.app_name}-${var.environment}-alb"
+  subnets         = var.public_subnet_ids
+  security_groups = concat("${var.security_groups_ids}", ["${aws_security_group.web_inbound_sg.id}"])
 
-  tags {
-    Name        = "${var.environment}-alb-openjobs"
+  tags = {
+    Name        = "${var.app_name}-${var.environment}-alb"
     Environment = "${var.environment}"
   }
 }
 
-resource "aws_alb_listener" "openjobs" {
-  load_balancer_arn = "${aws_alb.alb_openjobs.arn}"
+resource "aws_alb_listener" "front_end" {
+  load_balancer_arn = aws_alb.main.arn
   port              = "80"
   protocol          = "HTTP"
-  depends_on        = ["aws_alb_target_group.alb_target_group"]
+  depends_on        = [aws_alb_target_group.app]
 
   default_action {
-    target_group_arn = "${aws_alb_target_group.alb_target_group.arn}"
+    target_group_arn = aws_alb_target_group.app.arn
     type             = "forward"
   }
 }
@@ -153,10 +168,10 @@ resource "aws_alb_listener" "openjobs" {
 */
 data "aws_iam_policy_document" "ecs_service_role" {
   statement {
-    effect = "Allow"
+    effect  = "Allow"
     actions = ["sts:AssumeRole"]
     principals {
-      type = "Service"
+      type        = "Service"
       identifiers = ["ecs.amazonaws.com"]
     }
   }
@@ -164,12 +179,12 @@ data "aws_iam_policy_document" "ecs_service_role" {
 
 resource "aws_iam_role" "ecs_role" {
   name               = "ecs_role"
-  assume_role_policy = "${data.aws_iam_policy_document.ecs_service_role.json}"
+  assume_role_policy = data.aws_iam_policy_document.ecs_service_role.json
 }
 
 data "aws_iam_policy_document" "ecs_service_policy" {
   statement {
-    effect = "Allow"
+    effect    = "Allow"
     resources = ["*"]
     actions = [
       "elasticloadbalancing:Describe*",
@@ -183,21 +198,21 @@ data "aws_iam_policy_document" "ecs_service_policy" {
 
 /* ecs service scheduler role */
 resource "aws_iam_role_policy" "ecs_service_role_policy" {
-  name   = "ecs_service_role_policy"
+  name = "ecs_service_role_policy"
   #policy = "${file("${path.module}/policies/ecs-service-role.json")}"
-  policy = "${data.aws_iam_policy_document.ecs_service_policy.json}"
-  role   = "${aws_iam_role.ecs_role.id}"
+  policy = data.aws_iam_policy_document.ecs_service_policy.json
+  role   = aws_iam_role.ecs_role.id
 }
 
 /* role that the Amazon ECS container agent and the Docker daemon can assume */
 resource "aws_iam_role" "ecs_execution_role" {
   name               = "ecs_task_execution_role"
-  assume_role_policy = "${file("${path.module}/policies/ecs-task-execution-role.json")}"
+  assume_role_policy = file("${path.module}/policies/ecs-task-execution-role.json")
 }
 resource "aws_iam_role_policy" "ecs_execution_role_policy" {
   name   = "ecs_execution_role_policy"
-  policy = "${file("${path.module}/policies/ecs-execution-role-policy.json")}"
-  role   = "${aws_iam_role.ecs_execution_role.id}"
+  policy = file("${path.module}/policies/ecs-execution-role-policy.json")
+  role   = aws_iam_role.ecs_execution_role.id
 }
 
 /*====
@@ -206,8 +221,8 @@ ECS service
 
 /* Security Group for ECS */
 resource "aws_security_group" "ecs_service" {
-  vpc_id      = "${var.vpc_id}"
-  name        = "${var.environment}-ecs-service-sg"
+  vpc_id      = var.vpc_id
+  name        = "${var.app_name}-${var.environment}-ecs-service-sg"
   description = "Allow egress from container"
 
   egress {
@@ -224,38 +239,36 @@ resource "aws_security_group" "ecs_service" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  tags {
-    Name        = "${var.environment}-ecs-service-sg"
+  tags = {
+    Name        = "${var.app_name}-${var.environment}-ecs-service-sg"
     Environment = "${var.environment}"
   }
 }
 
 /* Simply specify the family to find the latest ACTIVE revision in that family */
 data "aws_ecs_task_definition" "web" {
-  task_definition = "${aws_ecs_task_definition.web.family}"
-  depends_on = [ "aws_ecs_task_definition.web" ]
+  task_definition = aws_ecs_task_definition.web.family
+  depends_on      = [aws_ecs_task_definition.web]
 }
 
 resource "aws_ecs_service" "web" {
-  name            = "${var.environment}-web"
+  name            = "${var.app_name}-${var.environment}-web"
   task_definition = "${aws_ecs_task_definition.web.family}:${max("${aws_ecs_task_definition.web.revision}", "${data.aws_ecs_task_definition.web.revision}")}"
   desired_count   = 2
   launch_type     = "FARGATE"
-  cluster =       "${aws_ecs_cluster.cluster.id}"
-  depends_on      = ["aws_iam_role_policy.ecs_service_role_policy"]
+  cluster         = aws_ecs_cluster.cluster.id
+  depends_on      = [aws_iam_role_policy.ecs_service_role_policy, aws_alb_target_group.app]
 
   network_configuration {
-    security_groups = ["${var.security_groups_ids}", "${aws_security_group.ecs_service.id}"]
-    subnets         = ["${var.subnets_ids}"]
+    security_groups = concat("${var.security_groups_ids}", ["${aws_security_group.ecs_service.id}"])
+    subnets         = var.subnets_ids
   }
 
   load_balancer {
-    target_group_arn = "${aws_alb_target_group.alb_target_group.arn}"
+    target_group_arn = aws_alb_target_group.app.arn
     container_name   = "web"
     container_port   = "80"
   }
-
-  depends_on = ["aws_alb_target_group.alb_target_group"]
 }
 
 
@@ -264,29 +277,29 @@ Auto Scaling for ECS
 ======*/
 
 resource "aws_iam_role" "ecs_autoscale_role" {
-  name               = "${var.environment}_ecs_autoscale_role"
-  assume_role_policy = "${file("${path.module}/policies/ecs-autoscale-role.json")}"
+  name               = "${var.app_name}_${var.environment}_ecs_autoscale_role"
+  assume_role_policy = file("${path.module}/policies/ecs-autoscale-role.json")
 }
 resource "aws_iam_role_policy" "ecs_autoscale_role_policy" {
   name   = "ecs_autoscale_role_policy"
-  policy = "${file("${path.module}/policies/ecs-autoscale-role-policy.json")}"
-  role   = "${aws_iam_role.ecs_autoscale_role.id}"
+  policy = file("${path.module}/policies/ecs-autoscale-role-policy.json")
+  role   = aws_iam_role.ecs_autoscale_role.id
 }
 
 resource "aws_appautoscaling_target" "target" {
   service_namespace  = "ecs"
   resource_id        = "service/${aws_ecs_cluster.cluster.name}/${aws_ecs_service.web.name}"
   scalable_dimension = "ecs:service:DesiredCount"
-  role_arn           = "${aws_iam_role.ecs_autoscale_role.arn}"
+  role_arn           = aws_iam_role.ecs_autoscale_role.arn
   min_capacity       = 2
   max_capacity       = 4
 }
 
 resource "aws_appautoscaling_policy" "up" {
-  name                    = "${var.environment}_scale_up"
-  service_namespace       = "ecs"
-  resource_id             = "service/${aws_ecs_cluster.cluster.name}/${aws_ecs_service.web.name}"
-  scalable_dimension      = "ecs:service:DesiredCount"
+  name               = "${var.app_name}_${var.environment}_scale_up"
+  service_namespace  = "ecs"
+  resource_id        = "service/${aws_ecs_cluster.cluster.name}/${aws_ecs_service.web.name}"
+  scalable_dimension = "ecs:service:DesiredCount"
 
 
   step_scaling_policy_configuration {
@@ -296,18 +309,18 @@ resource "aws_appautoscaling_policy" "up" {
 
     step_adjustment {
       metric_interval_lower_bound = 0
-      scaling_adjustment = 1
+      scaling_adjustment          = 1
     }
   }
 
-  depends_on = ["aws_appautoscaling_target.target"]
+  depends_on = [aws_appautoscaling_target.target]
 }
 
 resource "aws_appautoscaling_policy" "down" {
-  name                    = "${var.environment}_scale_down"
-  service_namespace       = "ecs"
-  resource_id             = "service/${aws_ecs_cluster.cluster.name}/${aws_ecs_service.web.name}"
-  scalable_dimension      = "ecs:service:DesiredCount"
+  name               = "${var.app_name}_${var.environment}_scale_down"
+  service_namespace  = "ecs"
+  resource_id        = "service/${aws_ecs_cluster.cluster.name}/${aws_ecs_service.web.name}"
+  scalable_dimension = "ecs:service:DesiredCount"
 
   step_scaling_policy_configuration {
     adjustment_type         = "ChangeInCapacity"
@@ -316,16 +329,16 @@ resource "aws_appautoscaling_policy" "down" {
 
     step_adjustment {
       metric_interval_lower_bound = 0
-      scaling_adjustment = -1
+      scaling_adjustment          = -1
     }
   }
 
-  depends_on = ["aws_appautoscaling_target.target"]
+  depends_on = [aws_appautoscaling_target.target]
 }
 
-/* metric used for auto scale */
+/* metric used for auto scale up*/
 resource "aws_cloudwatch_metric_alarm" "service_cpu_high" {
-  alarm_name          = "${var.environment}_openjobs_web_cpu_utilization_high"
+  alarm_name          = "${var.app_name}_${var.environment}_web_cpu_utilization_high"
   comparison_operator = "GreaterThanOrEqualToThreshold"
   evaluation_periods  = "2"
   metric_name         = "CPUUtilization"
@@ -334,11 +347,31 @@ resource "aws_cloudwatch_metric_alarm" "service_cpu_high" {
   statistic           = "Maximum"
   threshold           = "85"
 
-  dimensions {
+  dimensions = {
     ClusterName = "${aws_ecs_cluster.cluster.name}"
     ServiceName = "${aws_ecs_service.web.name}"
   }
 
+  alarm_actions = [aws_appautoscaling_policy.up.arn]
+  # ok_actions    = [aws_appautoscaling_policy.down.arn]
+}
+
+/* metric used for auto scale down*/
+resource "aws_cloudwatch_metric_alarm" "service_cpu_low" {
+  alarm_name          = "${var.app_name}_${var.environment}_web_cpu_utilization_low"
+  comparison_operator = "LessThanOrEqualToThreshold"
+  evaluation_periods  = "2"
+  metric_name         = "CPUUtilization"
+  namespace           = "AWS/ECS"
+  period              = "60"
+  statistic           = "Average"
+  threshold           = "10"
+
+  dimensions = {
+    ClusterName = aws_ecs_cluster.cluster.name
+    ServiceName = aws_ecs_service.web.name
+  }
+
   alarm_actions = ["${aws_appautoscaling_policy.up.arn}"]
-  ok_actions    = ["${aws_appautoscaling_policy.down.arn}"]
+  # ok_actions    = ["${aws_appautoscaling_policy.down.arn}"]
 }

@@ -5,24 +5,24 @@ resource "aws_s3_bucket" "source" {
 }
 
 resource "aws_iam_role" "codepipeline_role" {
-  name               = "codepipeline-role"
+  name = "codepipeline-role"
 
-  assume_role_policy = "${file("${path.module}/policies/codepipeline_role.json")}"
+  assume_role_policy = file("${path.module}/policies/codepipeline_role.json")
 }
 
 /* policies */
 data "template_file" "codepipeline_policy" {
-  template = "${file("${path.module}/policies/codepipeline.json")}"
+  template = file("${path.module}/policies/codepipeline.json")
 
-  vars {
+  vars = {
     aws_s3_bucket_arn = "${aws_s3_bucket.source.arn}"
   }
 }
 
 resource "aws_iam_role_policy" "codepipeline_policy" {
   name   = "codepipeline_policy"
-  role   = "${aws_iam_role.codepipeline_role.id}"
-  policy = "${data.template_file.codepipeline_policy.rendered}"
+  role   = aws_iam_role.codepipeline_role.id
+  policy = data.template_file.codepipeline_policy.rendered
 }
 
 /*
@@ -30,27 +30,27 @@ resource "aws_iam_role_policy" "codepipeline_policy" {
 */
 resource "aws_iam_role" "codebuild_role" {
   name               = "codebuild-role"
-  assume_role_policy = "${file("${path.module}/policies/codebuild_role.json")}"
+  assume_role_policy = file("${path.module}/policies/codebuild_role.json")
 }
 
 data "template_file" "codebuild_policy" {
-  template = "${file("${path.module}/policies/codebuild_policy.json")}"
+  template = file("${path.module}/policies/codebuild_policy.json")
 
-  vars {
+  vars = {
     aws_s3_bucket_arn = "${aws_s3_bucket.source.arn}"
   }
 }
 
 resource "aws_iam_role_policy" "codebuild_policy" {
-  name        = "codebuild-policy"
-  role        = "${aws_iam_role.codebuild_role.id}"
-  policy      = "${data.template_file.codebuild_policy.rendered}"
+  name   = "codebuild-policy"
+  role   = aws_iam_role.codebuild_role.id
+  policy = data.template_file.codebuild_policy.rendered
 }
 
 data "template_file" "buildspec" {
-  template = "${file("${path.module}/buildspec.yml")}"
+  template = file("${path.module}/buildspec.yml")
 
-  vars {
+  vars = {
     repository_url     = "${var.repository_url}"
     region             = "${var.region}"
     cluster_name       = "${var.ecs_cluster_name}"
@@ -63,14 +63,14 @@ data "template_file" "buildspec" {
 resource "aws_codebuild_project" "openjobs_build" {
   name          = "openjobs-codebuild"
   build_timeout = "10"
-  service_role  = "${aws_iam_role.codebuild_role.arn}"
+  service_role  = aws_iam_role.codebuild_role.arn
 
   artifacts {
     type = "CODEPIPELINE"
   }
 
   environment {
-    compute_type    = "BUILD_GENERAL1_SMALL"
+    compute_type = "BUILD_GENERAL1_SMALL"
     // https://docs.aws.amazon.com/codebuild/latest/userguide/build-env-ref-available.html
     image           = "aws/codebuild/docker:1.12.1"
     type            = "LINUX_CONTAINER"
@@ -79,7 +79,7 @@ resource "aws_codebuild_project" "openjobs_build" {
 
   source {
     type      = "CODEPIPELINE"
-    buildspec = "${data.template_file.buildspec.rendered}"
+    buildspec = data.template_file.buildspec.rendered
   }
 }
 
@@ -87,10 +87,10 @@ resource "aws_codebuild_project" "openjobs_build" {
 
 resource "aws_codepipeline" "pipeline" {
   name     = "openjobs-pipeline"
-  role_arn = "${aws_iam_role.codepipeline_role.arn}"
+  role_arn = aws_iam_role.codepipeline_role.arn
 
   artifact_store {
-    location = "${aws_s3_bucket.source.bucket}"
+    location = aws_s3_bucket.source.bucket
     type     = "S3"
   }
 
@@ -105,10 +105,10 @@ resource "aws_codepipeline" "pipeline" {
       version          = "1"
       output_artifacts = ["source"]
 
-      configuration {
-        Owner      = "duduribeiro"
-        Repo       = "openjobs_experiment"
-        Branch     = "master"
+      configuration = {
+        Owner  = "duduribeiro"
+        Repo   = "openjobs_experiment"
+        Branch = "master"
       }
     }
   }
@@ -125,7 +125,7 @@ resource "aws_codepipeline" "pipeline" {
       input_artifacts  = ["source"]
       output_artifacts = ["imagedefinitions"]
 
-      configuration {
+      configuration = {
         ProjectName = "openjobs-codebuild"
       }
     }
@@ -142,7 +142,7 @@ resource "aws_codepipeline" "pipeline" {
       input_artifacts = ["imagedefinitions"]
       version         = "1"
 
-      configuration {
+      configuration = {
         ClusterName = "${var.ecs_cluster_name}"
         ServiceName = "${var.ecs_service_name}"
         FileName    = "imagedefinitions.json"
